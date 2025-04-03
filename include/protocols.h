@@ -3,6 +3,9 @@
 
 #ifndef ETHERTYPE_IP
 #define ETHERTYPE_IP		0x0800	/* IP protocol */
+#define ETHERTYPE_ARP   0x0806
+#define ARP_REQUEST 0x0001
+#define ARP_REPLY 0x0002
 #endif
 
 /* Ethernet ARP packet from RFC 826 */
