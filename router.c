@@ -4,16 +4,24 @@
 #include <arpa/inet.h>  // For ntohs, ntohl, htons, htonl
 #include <string.h>
 
+typedef struct pair {
+	struct route_table_entry *route;
+	char buf[MAX_PACKET_LEN];
+	size_t len;
+} pair;
 
 /* Routing table */
 struct route_table_entry *rtable;
 int rtable_len;
 
 /* Mac table */
-
 #define CAPACITY 100
 struct arp_table_entry *mac_table;
 int mac_table_len;
+
+/* Package queue */
+queue waiting_queue;
+queue aux_q;
 
 // Debugg 
 
@@ -127,6 +135,30 @@ void send_arp_request(size_t interface, uint32_t ip) {
 	send_to_link(42, buf, interface);
 }
 
+queue scan_queue() {
+	while (!queue_empty(waiting_queue)) {
+		pair *current = queue_deq(waiting_queue);
+		// Check if the ip is in arp cache
+		struct arp_table_entry *mac = get_mac_entry(current->route->next_hop);
+		if (mac != NULL) {
+			// Copy mack to ether frame destination
+			struct ether_hdr *eth = (struct ether_hdr *)current->buf; 
+			memcpy(eth->ethr_dhost, mac->mac, 6);
+
+			send_to_link(current->len, current->buf, current->route->interface);
+			// Free the current element
+			free(current);
+		} else {
+			queue_enq(aux_q, current);
+		}
+	}
+	while (!queue_empty(aux_q)) {
+		pair *iter = queue_deq(aux_q);
+		queue_enq(waiting_queue, iter);
+	}
+	return waiting_queue;
+}
+
 int main(int argc, char *argv[])
 {
 	char buf[MAX_PACKET_LEN];
@@ -145,10 +177,11 @@ int main(int argc, char *argv[])
 	mac_table_len = 0;
 	// mac_table_len = parse_arp_table("arp_table.txt", mac_table);
 
-	int debug_counter = 0;
+	// Init the waiting queue
+	waiting_queue = create_queue();
+	aux_q = create_queue();
 
 	while (1) {
-		debug_counter ++;
 		size_t interface;
 		size_t len;
 
@@ -193,6 +226,15 @@ int main(int argc, char *argv[])
 			if (mac_entry == NULL) {
 				// we need to wait for arp request
 				// TBI
+				get_interface_mac(best_route->interface, eth_hdr->ethr_shost);
+				send_arp_request(best_route->interface, best_route->next_hop);
+				// Enqueue the current package
+				pair *q_pair = calloc(1, sizeof(pair));
+				memcpy(q_pair->buf, buf, MAX_PACKET_LEN);
+				q_pair->route = best_route;
+				q_pair->len = len;
+				queue_enq(waiting_queue, q_pair);
+				// Done enquing
 				continue;
 			}
 			memcpy(eth_hdr->ethr_dhost, mac_entry->mac, 6);
@@ -200,7 +242,7 @@ int main(int argc, char *argv[])
 			send_to_link(len, buf, best_route->interface);
 		}
 
-		// TO-DO: check for ARP request
+		// ARP PROTOCOL
 		if (eth_hdr->ethr_type == htons(ETHERTYPE_ARP)) {
 			DIE(mac_table_len >= CAPACITY, "Lenght exceeded mac_table_capacity\n");
 
@@ -218,7 +260,6 @@ int main(int argc, char *argv[])
 					printf("OWN MAC DETECTED. SKIPPING\n");
 					continue;
 				}
-				if (debug_counter % 3 == 0) send_arp_request(interface, arphdr->sprotoa);
 
 				int already_in_table = 0;
 				for (int i = 0; i < mac_table_len; i++) {
@@ -233,15 +274,19 @@ int main(int argc, char *argv[])
 						break;
 					}
 				}
+				print_mac_table_enty();
+
 				if (already_in_table)
 					continue;
 				// Mac not in table
 				mac_table[mac_table_len].ip = arphdr->sprotoa;
 				memcpy(mac_table[mac_table_len].mac, arphdr->shwa, 6);
 				mac_table_len++;
+
+				waiting_queue = scan_queue();
+
 				// Done parsing. Reply is generated automatically
-				print_mac_table_enty();
-				printf("Parsed ARP %s. New table length: %d\n", ntohs(arphdr->opcode) == 1 ? "REQUEST" : "REPLY", mac_table_len);
+				printf("Parsed ARP %s. New table length: %d\n", ntohs(arphdr->opcode) == 1 ? "REQUEST" : "REPLY", mac_table_len);			
 			}
 
 			if (arphdr->opcode != ntohs(ARP_REPLY) && arphdr->opcode != ntohs(ARP_REQUEST)) {
