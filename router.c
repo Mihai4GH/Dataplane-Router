@@ -246,9 +246,9 @@ int main(int argc, char *argv[])
 		if (eth_hdr->ethr_type == htons(ETHERTYPE_ARP)) {
 			DIE(mac_table_len >= CAPACITY, "Lenght exceeded mac_table_capacity\n");
 
-			printf("We received an ARP packet\n");
-
 			struct arp_hdr *arphdr = (struct arp_hdr*)(buf + sizeof(struct ether_hdr));
+
+			printf("We received an ARP packet, OPCODE = %d, REQ = %d\n", arphdr->opcode, htons(ARP_REQUEST));
 
 			if (arphdr->opcode == ntohs(ARP_REQUEST) || arphdr->opcode == ntohs(ARP_REPLY)) {
 				// 	Add the sender. The reply is done automatically by the kernel
@@ -275,6 +275,42 @@ int main(int argc, char *argv[])
 					}
 				}
 				print_mac_table_enty();
+
+				if (arphdr->opcode == ntohs(ARP_REQUEST)) {
+					uint32_t my_interface_ip = ntohl(ip_to_int(get_interface_ip(interface)));
+					// printIp(arphdr->tprotoa, "Arp req ip");
+					// printIp(my_interface_ip, "My ip");
+
+					if (arphdr->tprotoa != my_interface_ip)
+						continue;
+
+					printf("Request received. Sending reply\n");
+					char *reply = calloc(1, 1500);
+					memcpy(reply, buf, len);
+					struct ether_hdr* reply_eth = (struct ether_hdr *)reply;
+					struct arp_hdr* reply_arp = (struct arp_hdr *)(reply + sizeof(struct ether_hdr));
+					memcpy(reply_eth->ethr_dhost, reply_eth->ethr_shost, 6);
+					get_interface_mac(interface, reply_eth->ethr_shost);
+
+					memcpy(reply_arp->thwa, reply_eth->ethr_dhost, 6);
+					memcpy(reply_arp->shwa, reply_eth->ethr_shost, 6);
+
+					reply_arp->tprotoa = reply_arp->sprotoa;
+					reply_arp->sprotoa = my_interface_ip;
+
+					reply_arp->opcode = htons(ARP_REPLY);
+					print_cmp_mac((char *)reply_eth->ethr_shost, (char *)reply_arp->shwa, "from\t");
+					print_cmp_mac((char *)reply_eth->ethr_dhost, (char *)reply_arp->thwa, "to\t");
+					printIp(reply_arp->sprotoa, "sender");
+					printIp(reply_arp->tprotoa, "target");
+					int len_reply = 0;
+					while (len_reply < len) {
+						len_reply += send_to_link(len-len_reply, reply, interface);
+						printf("len_reply %d\n", len_reply);
+					}
+					printf("Sent\n\n");
+					free(reply);
+				}
 
 				if (already_in_table)
 					continue;
