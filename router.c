@@ -81,19 +81,19 @@ struct route_table_entry *get_best_route(uint32_t ip) {
 	// printIp(best->prefix, "Prefix");
 	// printIp(best->next_hop, "Next hop");
 
-	return best;
+	return found == 0 ? NULL : best;
 }
 
 struct arp_table_entry* get_mac_entry(uint32_t given_ip) {
-	printf("%d\n", mac_table_len);
-	printIp(given_ip, "Looking for");
+	// printf("%d\n", mac_table_len);
+	// printIp(given_ip, "Looking for");
 	for (int i = 0; i < mac_table_len; i++) {
 		if (mac_table[i].ip == given_ip) {
-			printIp(mac_table[i].ip, "Analyzing ip");
+			// printIp(mac_table[i].ip, "Analyzing ip");
 			return &mac_table[i];
 		}
 	}
-	printf("MAC NOT RECOGNIZED\n");
+	// printf("MAC NOT RECOGNIZED\n");
 	return NULL;
 }
 
@@ -159,6 +159,33 @@ queue scan_queue() {
 	return waiting_queue;
 }
 
+void echo_reply(char *buf, size_t len, size_t ineterface, char type, char code) {
+	struct ether_hdr *eth_hdr = (struct ether_hdr *)buf;
+	
+	// Sender back
+	memcpy(eth_hdr->ethr_dhost, eth_hdr->ethr_shost, 6);
+	get_interface_mac(ineterface, eth_hdr->ethr_shost);
+
+	struct ip_hdr* ip_hdr = (struct ip_hdr *)(buf + sizeof(struct ether_hdr));
+	ip_hdr->ttl = 64;
+	ip_hdr->dest_addr = ip_hdr->source_addr;
+	ip_hdr->source_addr = ntohl(ip_to_int(get_interface_ip(ineterface)));
+	ip_hdr->checksum = 0;
+	ip_hdr->checksum = htons(checksum((uint16_t *)ip_hdr, sizeof(struct ip_hdr)));
+
+	struct icmp_hdr* icmp_hdr = (struct icmp_hdr *)(buf + sizeof(struct ether_hdr) + sizeof(struct ip_hdr));
+	icmp_hdr->mtype = type;
+	icmp_hdr->mcode = code;
+	icmp_hdr->check = 0;
+	// printf("here %ld %ld\n", ntohs(ip_hdr->tot_len) - sizeof(struct ip_hdr), sizeof(struct icmp_hdr));
+
+	icmp_hdr->check = htons(checksum((uint16_t *)(buf + sizeof(struct ether_hdr) + sizeof(struct ip_hdr)),
+									 ntohs(ip_hdr->tot_len) - sizeof(struct ip_hdr)));
+
+
+	send_to_link(len, buf, ineterface);
+}
+
 int main(int argc, char *argv[])
 {
 	char buf[MAX_PACKET_LEN];
@@ -190,6 +217,13 @@ int main(int argc, char *argv[])
 
     // TODO: Implement the router forwarding logic
 		struct ether_hdr *eth_hdr = (struct ether_hdr *) buf;
+
+		uint8_t cmp_buf[6] = {0};
+		get_interface_mac(interface, cmp_buf);
+		if (!strcmp((const char*)cmp_buf, (const char*)eth_hdr->ethr_shost)) {
+			printf("Skip this!\n\n\n");
+			continue;
+		} 
 		
 		if (eth_hdr->ethr_type == ntohs(ETHERTYPE_IP)) {
 			// We have an ip_package
@@ -205,19 +239,39 @@ int main(int argc, char *argv[])
 				continue;
 			}
 
-			struct route_table_entry *best_route = get_best_route(ip_hdr->dest_addr);
-		
-			if (!best_route) {
-				printf("Destination host unreachable!\n");
+
+			if (ip_hdr->dest_addr == htonl(ip_to_int(get_interface_ip(interface))) && ip_hdr->proto == IPPROTO_ICMP) {
+				// We received an echo request destinated to us
+				echo_reply(buf, len, interface, 0, 0);
+				printf("Icmp echo reply ongoing...\n");
 				continue;
 			}
 
 			// Check ttl
 			if (ip_hdr->ttl <= 1) {
 				printf("TTL reached 0\n");
+				echo_reply(buf, len, interface, 11, 0);
 				continue;
 			}
 			ip_hdr->ttl--;
+
+			struct route_table_entry *best_route = get_best_route(ip_hdr->dest_addr);
+		
+			if (!best_route) {
+				printf("Destination host unreachable!\n");
+				// echo_reply(buf, len, interface, 3, 2);
+				continue;
+			} else {
+				printf("Recognized ip\n");
+			}
+
+			// // Check ttl
+			// if (ip_hdr->ttl <= 1) {
+			// 	printf("TTL reached 0\n");
+			// 	echo_reply(buf, len, interface, 11, 0);
+			// 	continue;
+			// }
+			// ip_hdr->ttl--;
 
 			ip_hdr->checksum = 0;
 			ip_hdr->checksum = htons(checksum((u_int16_t *)ip_hdr, sizeof(struct ip_hdr)));
@@ -299,16 +353,16 @@ int main(int argc, char *argv[])
 					reply_arp->sprotoa = my_interface_ip;
 
 					reply_arp->opcode = htons(ARP_REPLY);
-					print_cmp_mac((char *)reply_eth->ethr_shost, (char *)reply_arp->shwa, "from\t");
-					print_cmp_mac((char *)reply_eth->ethr_dhost, (char *)reply_arp->thwa, "to\t");
-					printIp(reply_arp->sprotoa, "sender");
-					printIp(reply_arp->tprotoa, "target");
+					// print_cmp_mac((char *)reply_eth->ethr_shost, (char *)reply_arp->shwa, "from\t");
+					// print_cmp_mac((char *)reply_eth->ethr_dhost, (char *)reply_arp->thwa, "to\t");
+					// printIp(reply_arp->sprotoa, "sender");
+					// printIp(reply_arp->tprotoa, "target");
 					int len_reply = 0;
 					while (len_reply < len) {
 						len_reply += send_to_link(len-len_reply, reply, interface);
-						printf("len_reply %d\n", len_reply);
+						// printf("len_reply %d\n", len_reply);
 					}
-					printf("Sent\n\n");
+					// printf("Sent\n\n");
 					free(reply);
 				}
 
