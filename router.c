@@ -14,6 +14,9 @@ typedef struct pair {
 struct route_table_entry *rtable;
 int rtable_len;
 
+/* Trie */
+struct trie_node *root;
+
 /* Mac table */
 #define CAPACITY 100
 struct arp_table_entry *mac_table;
@@ -53,7 +56,89 @@ void print_mac_table_enty() {
 	}
 }
 
-//
+// Trie implementation starts here
+struct trie_node {
+    struct route_table_entry *entry;
+    struct trie_node *children[2];    
+};
+
+struct trie_node *create_node() {
+    struct trie_node *node = (struct trie_node *)malloc(sizeof(struct trie_node));
+    if (node) {
+        node->entry = NULL;
+        node->children[0] = NULL;
+        node->children[1] = NULL;
+    }
+    return node;
+}
+
+void insert_route(struct trie_node *root, struct route_table_entry *route) {
+    struct trie_node *current = root;
+    uint32_t prefix = ntohl(route->prefix);
+    uint32_t mask = ntohl(route->mask);
+    
+    // Calculate the prefix length from the mask
+    int prefix_length = 0;
+    uint32_t temp_mask = mask;
+    while (temp_mask) {
+        prefix_length += (temp_mask & 1);
+        temp_mask >>= 1;
+    }
+    
+    // Start from the most significant bit of the prefix
+    for (int i = 31; i >= 32 - prefix_length; i--) {
+        int bit = (prefix >> i) & 1;
+        
+        if (!current->children[bit]) {
+            current->children[bit] = create_node();
+        }
+        
+        current = current->children[bit];
+    }
+    
+    // Store the route at the appropriate node
+    current->entry = route;
+}
+
+struct trie_node *build_trie(struct route_table_entry *rtable, int rtable_len) {
+    struct trie_node *root = create_node();
+    
+    for (int i = 0; i < rtable_len; i++) {
+        insert_route(root, &rtable[i]);
+    }
+    
+    return root;
+}
+
+struct route_table_entry *get_best_route_trie(uint32_t ip) {
+	printf("Trie lookup...\n");
+    struct trie_node *current = root;
+    struct route_table_entry *best_match = NULL;
+
+	ip = ntohl(ip);
+
+    // Traverse the trie from most significant bit to least significant bit
+    for (int i = 31; i >= 0; i--) {
+        int bit = (ip >> i) & 1;
+        
+        if (!current->children[bit]) {
+            break; // No matching path
+        }
+        
+        current = current->children[bit];
+        
+        // If there's an entry at this node, it's a potential match
+        if (current->entry) {
+            // We're already traversing in order of longest prefix, so any match is better than previous ones
+            best_match = current->entry;
+        }
+    }
+    
+    return best_match;
+}
+
+// 	Trie implementation ends here. No need for delete functions, as the trie exists
+// for as long as the router is up.
 
 
 struct route_table_entry *get_best_route(uint32_t ip) {
@@ -186,6 +271,48 @@ void echo_reply(char *buf, size_t len, size_t ineterface, char type, char code) 
 	send_to_link(len, buf, ineterface);
 }
 
+void echo_reply_error(char *buf, size_t len, size_t interface, char type, char code) {
+	char resp[256] = {0};
+
+	struct ether_hdr *eth = (struct ether_hdr *)resp;
+	struct ether_hdr *old_eth = (struct ether_hdr *)buf;
+	memcpy(eth->ethr_dhost, old_eth->ethr_shost, 6);
+	memcpy(eth->ethr_shost, old_eth->ethr_dhost, 6);
+	eth->ethr_type = old_eth->ethr_type;
+
+	struct ip_hdr *ip = (struct ip_hdr *)(resp + sizeof(struct ether_hdr));
+	struct ip_hdr *old_ip = (struct ip_hdr *)(buf + sizeof(struct ether_hdr));
+
+	ip->dest_addr = old_ip->source_addr;
+	ip->source_addr = htonl(ip_to_int(get_interface_ip(interface)));
+	ip->checksum = 0;
+	ip->ttl = 64;
+	ip->frag = 0;
+	ip->id = 4;
+	ip->tos = 0;
+	ip->ihl = 5;
+	ip->ver = 4;
+	ip->proto = IPPROTO_ICMP;
+	ip->tot_len = htons((2*sizeof(struct ip_hdr) + sizeof(struct icmp_hdr) + 64));
+
+	ip->checksum = htons(checksum((uint16_t *)ip, sizeof(struct ip_hdr)));
+
+	struct icmp_hdr *icmp = (struct icmp_hdr *)(resp + sizeof(struct ether_hdr) + sizeof(struct ip_hdr));
+	icmp->check = 0;
+	icmp->mtype = type;
+	icmp->mcode = code;
+	icmp->un_t.echo_t.id = 0;
+	icmp->un_t.echo_t.seq = 0;
+
+	memcpy((char *)(icmp+1), (char *)old_ip, sizeof(struct ip_hdr) + 64);
+	icmp->check = htons(checksum((uint16_t *)icmp, sizeof(struct ip_hdr) + sizeof(struct icmp_hdr) + 64));
+
+
+	size_t lenght = sizeof(struct ether_hdr) + sizeof(struct ip_hdr) * 2 + sizeof(struct icmp_hdr) + 64;
+	send_to_link(lenght, resp, interface);
+	return;
+}
+
 int main(int argc, char *argv[])
 {
 	char buf[MAX_PACKET_LEN];
@@ -197,6 +324,7 @@ int main(int argc, char *argv[])
 	rtable = malloc(sizeof(struct route_table_entry) * 70000);
 	DIE(rtable == NULL, "Failed malloc\n");
 	rtable_len = read_rtable(argv[1], rtable);
+	root = build_trie(rtable, rtable_len);
 
 	// Read static MAC
 	mac_table = malloc(sizeof(struct arp_table_entry) * CAPACITY);
@@ -250,16 +378,16 @@ int main(int argc, char *argv[])
 			// Check ttl
 			if (ip_hdr->ttl <= 1) {
 				printf("TTL reached 0\n");
-				echo_reply(buf, len, interface, 11, 0);
+				echo_reply_error(buf, len, interface, 11, 0);
 				continue;
 			}
 			ip_hdr->ttl--;
 
-			struct route_table_entry *best_route = get_best_route(ip_hdr->dest_addr);
+			struct route_table_entry *best_route = get_best_route_trie(ip_hdr->dest_addr);
 		
 			if (!best_route) {
 				printf("Destination host unreachable!\n");
-				// echo_reply(buf, len, interface, 3, 2);
+				echo_reply_error(buf, len, interface, 3, 0);
 				continue;
 			} else {
 				printf("Recognized ip\n");
