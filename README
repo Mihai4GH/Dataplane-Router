@@ -4,6 +4,13 @@
 
 This project implements a simple router with IPv4 packet forwarding, ARP handling, and ICMP error messaging. The implementation uses a trie data structure for efficient routing table lookups and maintains an ARP cache for MAC address resolution.
 
+**Assignment's link**: https://pcom.pages.upb.ro/tema1/
+
+## How to run?
+
+- To run the simulation in the project's root directory run `sudo python3 /checker/topo.py`
+- Inside the each of the router's designated terminals run `make run_router0`/`make run_router1` 
+
 ## Implemented the following
 
 - **Efficient Packet Forwarding**: Uses a trie data structure for O(1) routing table lookups
