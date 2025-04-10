@@ -4,6 +4,7 @@
 #include <arpa/inet.h>  // For ntohs, ntohl, htons, htonl
 #include <string.h>
 
+/* Pair to store information in queue */
 typedef struct pair {
 	struct route_table_entry *route;
 	char buf[MAX_PACKET_LEN];
@@ -24,11 +25,11 @@ int mac_table_len;
 
 /* Package queue */
 queue waiting_queue;
+/* Auxiliar queue used for processing elements of waiting_queue */
 queue aux_q;
 
-// Debugg 
+// Debugg Function - All on network order
 
-// Network Order
 void printIp(uint32_t ipaddr, char* msg) {
     printf("%s: %u.%u.%u.%u\n", msg 
                         , ipaddr & 0xFF
@@ -136,49 +137,15 @@ struct route_table_entry *get_best_route_trie(uint32_t ip) {
     
     return best_match;
 }
-
 // 	Trie implementation ends here. No need for delete functions, as the trie exists
 // for as long as the router is up.
 
-
-struct route_table_entry *get_best_route(uint32_t ip) {
-	// Debugg snippets
-	// printIp(ip, "Looking for");
-	// printIp(rtable->prefix, "Prefix");
-	// printIp(rtable->mask & ip, "Maked addr");
-	struct route_table_entry *best = rtable;
-	int found = 0, i = 0;
-	for (i = 0; i < rtable_len && !found; i++) {
-		if((rtable[i].mask & ip) == rtable[i].prefix) {
-			printf("gasit\n");
-			best = &rtable[i];
-			found = 1;
-		}
-	}
-	for (; i < rtable_len; i++) {
-		if ((rtable[i].mask > best->mask) && rtable[i].prefix == (rtable[i].mask & ip))
-			best = &rtable[i];
-	}
-
-	// printIp(ip, "Looking for");
-	// printIp(ip & best->mask, "IP MASKED");
-	// printIp(best->mask, "Mask");
-	// printIp(best->prefix, "Prefix");
-	// printIp(best->next_hop, "Next hop");
-
-	return found == 0 ? NULL : best;
-}
-
 struct arp_table_entry* get_mac_entry(uint32_t given_ip) {
-	// printf("%d\n", mac_table_len);
-	// printIp(given_ip, "Looking for");
 	for (int i = 0; i < mac_table_len; i++) {
 		if (mac_table[i].ip == given_ip) {
-			// printIp(mac_table[i].ip, "Analyzing ip");
 			return &mac_table[i];
 		}
 	}
-	// printf("MAC NOT RECOGNIZED\n");
 	return NULL;
 }
 
@@ -186,7 +153,7 @@ unsigned int ip_to_int(char *ip_str)
 {
     struct in_addr addr;
     inet_pton(AF_INET, ip_str, &addr);  // Convert IP string to binary format
-    return ntohl(addr.s_addr);          // Convert to host byte order (32-bit integer)
+    return ntohl(addr.s_addr);          // Convert to host order
 }
 
 // Function to send an arp request on a specific interface, looking for ip
@@ -209,9 +176,6 @@ void send_arp_request(size_t interface, uint32_t ip) {
 	// Sender hw/prot adress
 	get_interface_mac(interface, arp->shwa);
 	arp->sprotoa = ntohl(ip_to_int(get_interface_ip(interface)));
-	// Just a print for debugg
-	printIp(ntohl(ip_to_int(get_interface_ip(interface))), get_interface_ip(interface));
-
 	// Target hw/prot addr
 	arp->tprotoa = ip;
 	memset(arp->thwa, 0, 6);
@@ -231,12 +195,14 @@ queue scan_queue() {
 			memcpy(eth->ethr_dhost, mac->mac, 6);
 
 			send_to_link(current->len, current->buf, current->route->interface);
-			// Free the current element
+			// Remove from queue and free the current element
 			free(current);
 		} else {
+			// Store the elements that cant be forwarded
 			queue_enq(aux_q, current);
 		}
 	}
+	// Rebuild the queue
 	while (!queue_empty(aux_q)) {
 		pair *iter = queue_deq(aux_q);
 		queue_enq(waiting_queue, iter);
@@ -262,15 +228,14 @@ void echo_reply(char *buf, size_t len, size_t ineterface, char type, char code) 
 	icmp_hdr->mtype = type;
 	icmp_hdr->mcode = code;
 	icmp_hdr->check = 0;
-	// printf("here %ld %ld\n", ntohs(ip_hdr->tot_len) - sizeof(struct ip_hdr), sizeof(struct icmp_hdr));
 
 	icmp_hdr->check = htons(checksum((uint16_t *)(buf + sizeof(struct ether_hdr) + sizeof(struct ip_hdr)),
 									 ntohs(ip_hdr->tot_len) - sizeof(struct ip_hdr)));
 
-
 	send_to_link(len, buf, ineterface);
 }
 
+// Build and send an ICMP package (either ttl reach 0 or host unreachable)
 void echo_reply_error(char *buf, size_t len, size_t interface, char type, char code) {
 	char resp[256] = {0};
 
@@ -324,13 +289,13 @@ int main(int argc, char *argv[])
 	rtable = malloc(sizeof(struct route_table_entry) * 70000);
 	DIE(rtable == NULL, "Failed malloc\n");
 	rtable_len = read_rtable(argv[1], rtable);
+	// Build the trie
 	root = build_trie(rtable, rtable_len);
 
 	// Read static MAC
 	mac_table = malloc(sizeof(struct arp_table_entry) * CAPACITY);
 	DIE(mac_table == NULL, "Failed malloc\n");
 	mac_table_len = 0;
-	// mac_table_len = parse_arp_table("arp_table.txt", mac_table);
 
 	// Init the waiting queue
 	waiting_queue = create_queue();
@@ -348,8 +313,9 @@ int main(int argc, char *argv[])
 
 		uint8_t cmp_buf[6] = {0};
 		get_interface_mac(interface, cmp_buf);
+		// If this package was sent by the router skip it.
 		if (!strcmp((const char*)cmp_buf, (const char*)eth_hdr->ethr_shost)) {
-			printf("Skip this!\n\n\n");
+			printf("Package sent by own self detected. Skipping...\n");
 			continue;
 		} 
 		
@@ -361,20 +327,18 @@ int main(int argc, char *argv[])
 			
 			uint16_t check = ntohs(ip_hdr->checksum);
 			ip_hdr->checksum = 0;
-			
+			// Checksum
 			if (check != checksum((uint16_t *)ip_hdr, sizeof(struct ip_hdr))) {
 				printf("IP checksum failed. Dropping packet...\n");
 				continue;
 			}
-
-
+			// Ping request
 			if (ip_hdr->dest_addr == htonl(ip_to_int(get_interface_ip(interface))) && ip_hdr->proto == IPPROTO_ICMP) {
 				// We received an echo request destinated to us
 				echo_reply(buf, len, interface, 0, 0);
 				printf("Icmp echo reply ongoing...\n");
 				continue;
 			}
-
 			// Check ttl
 			if (ip_hdr->ttl <= 1) {
 				printf("TTL reached 0\n");
@@ -384,7 +348,7 @@ int main(int argc, char *argv[])
 			ip_hdr->ttl--;
 
 			struct route_table_entry *best_route = get_best_route_trie(ip_hdr->dest_addr);
-		
+
 			if (!best_route) {
 				printf("Destination host unreachable!\n");
 				echo_reply_error(buf, len, interface, 3, 0);
@@ -393,21 +357,12 @@ int main(int argc, char *argv[])
 				printf("Recognized ip\n");
 			}
 
-			// // Check ttl
-			// if (ip_hdr->ttl <= 1) {
-			// 	printf("TTL reached 0\n");
-			// 	echo_reply(buf, len, interface, 11, 0);
-			// 	continue;
-			// }
-			// ip_hdr->ttl--;
-
 			ip_hdr->checksum = 0;
 			ip_hdr->checksum = htons(checksum((u_int16_t *)ip_hdr, sizeof(struct ip_hdr)));
 
 			struct arp_table_entry *mac_entry = get_mac_entry(best_route->next_hop);
 			if (mac_entry == NULL) {
-				// we need to wait for arp request
-				// TBI
+				// Send arp request
 				get_interface_mac(best_route->interface, eth_hdr->ethr_shost);
 				send_arp_request(best_route->interface, best_route->next_hop);
 				// Enqueue the current package
@@ -416,7 +371,7 @@ int main(int argc, char *argv[])
 				q_pair->route = best_route;
 				q_pair->len = len;
 				queue_enq(waiting_queue, q_pair);
-				// Done enquing
+				// Process next packets
 				continue;
 			}
 			memcpy(eth_hdr->ethr_dhost, mac_entry->mac, 6);
@@ -447,9 +402,6 @@ int main(int argc, char *argv[])
 				for (int i = 0; i < mac_table_len; i++) {
 					if (mac_table[i].ip == arphdr->sprotoa) {
 						// Already added. Assume that the mac and IP doesnt change
-						// printIp(mac_table[i].ip, "Mac table ip");
-						// printIp(arphdr->sprotoa, "Request ip");
-						// print_cmp_mac((char *)mac_table[i].mac, (char *)arphdr->shwa, "TABLE | REQ");
 						DIE(memcmp(mac_table[i].mac, arphdr->shwa, 6), "MAC OF ONE ENTITY CHANGED (in parsing arp request)\n");
 						// Continue if already in table
 						already_in_table = 1;
@@ -460,8 +412,6 @@ int main(int argc, char *argv[])
 
 				if (arphdr->opcode == ntohs(ARP_REQUEST)) {
 					uint32_t my_interface_ip = ntohl(ip_to_int(get_interface_ip(interface)));
-					// printIp(arphdr->tprotoa, "Arp req ip");
-					// printIp(my_interface_ip, "My ip");
 
 					if (arphdr->tprotoa != my_interface_ip)
 						continue;
@@ -481,16 +431,10 @@ int main(int argc, char *argv[])
 					reply_arp->sprotoa = my_interface_ip;
 
 					reply_arp->opcode = htons(ARP_REPLY);
-					// print_cmp_mac((char *)reply_eth->ethr_shost, (char *)reply_arp->shwa, "from\t");
-					// print_cmp_mac((char *)reply_eth->ethr_dhost, (char *)reply_arp->thwa, "to\t");
-					// printIp(reply_arp->sprotoa, "sender");
-					// printIp(reply_arp->tprotoa, "target");
 					int len_reply = 0;
 					while (len_reply < len) {
 						len_reply += send_to_link(len-len_reply, reply, interface);
-						// printf("len_reply %d\n", len_reply);
 					}
-					// printf("Sent\n\n");
 					free(reply);
 				}
 
