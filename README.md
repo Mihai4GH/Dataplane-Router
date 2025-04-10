@@ -1,0 +1,102 @@
+# Routing Table Implementation with Trie
+
+## Overview
+
+This project implements a simple router with IPv4 packet forwarding, ARP handling, and ICMP error messaging. The implementation uses a trie data structure for efficient routing table lookups and maintains an ARP cache for MAC address resolution.
+
+**Assignment's link**: https://pcom.pages.upb.ro/tema1/
+
+## How to run?
+
+- To run the simulation in the project's root directory run `sudo python3 /checker/topo.py`
+- Inside the each of the router's designated terminals run `make run_router0`/`make run_router1` 
+
+## Implemented the following
+
+- **Efficient Packet Forwarding**: Uses a trie data structure for O(1) routing table lookups
+- **ARP Protocol Support**: Handles ARP requests/replies and maintains an ARP cache
+- **Packet Queueing**: Temporarily stores packets waiting for ARP resolution
+- **ICMP Error Handling**: Generates appropriate ICMP error messages for:
+  - Time-to-live (TTL) exceeded
+  - Destination host unreachable
+  - Echo replies for ping requests
+
+## Data Structures
+
+### Routing Table Trie
+
+The router uses a binary trie for fast lookups of the most specific (longest prefix match) route to a destination IP. Each bit in the IP address corresponds to a path in the trie (0 for left, 1 for right). Each search will be done in O(1) complexity, as the maximum levels of the tree will be 32 (constant).
+
+```
+struct trie_node {
+    struct route_table_entry *entry;  // Route entry at this node
+    struct trie_node *children[2];    // Binary children (0 and 1)
+};
+```
+
+### Dynamic MAC table
+
+The router maintains a MAC address table that maps IP addresses to MAC addresses:
+
+```
+struct arp_table_entry {
+    uint32_t ip;
+    uint8_t mac[6];
+};
+```
+
+### Packet Queue
+
+Packets that need to be forwarded but are waiting for ARP resolution are stored in a queue of `struct pair`:
+
+```
+typedef struct pair {
+    struct route_table_entry *route;
+    char buf[MAX_PACKET_LEN];
+    size_t len;
+} pair;
+```
+
+## Packet Processing Flow
+
+1. **Packet Reception**: The router receives packets from any interface
+2. **Packet Classification**: Determines if it's an IP or ARP packet
+3. **For IP Packets**:
+   - Verifies checksum
+   - Handles ICMP echo requests to router interfaces
+   - Checks TTL and generates ICMP error if expired
+   - Performs trie lookup to find next hop
+   - Forwards packet or queues it pending ARP resolution
+4. **For ARP Packets**:
+   - Updates ARP cache with sender information
+   - Generates ARP replies for requests to router interfaces
+   - Processes queued packets that can now be forwarded
+
+## Key Functions
+
+- `get_best_route_trie()`: Finds the best route for an IP address using the trie
+- `send_arp_request()`: Sends an ARP request for a specific IP
+- `scan_queue()`: Processes queued packets waiting for ARP resolution
+- `echo_reply()`: Generates and sends ICMP echo replies (ping responses)
+- `echo_reply_error()`: Generates ICMP and sends error messages
+
+## Implementation Notes
+
+- All IP addresses and checksums handle network-to-host byte order conversion
+- The router ignores packets it sent itself to avoid loops
+- The ARP cache has a fixed capacity (defined by `CAPACITY`)
+- The implementation maintains queued packets until ARP resolution succeeds
+
+## Future Improvements
+
+- **ARP Cache Management**: Currently, the ARP cache has a fixed capacity (`CAPACITY` = 100 entries) with no mechanism to handle overflow or remove stale entries. A timeout-based cache management system needs to be implemented to:
+  - Remove old/inactive MAC address mappings
+  - Prioritize frequently used entries
+  - Prevent the cache from reaching its size limit
+
+## Debugging Features
+
+The code includes several debugging functions to print information in a readable format:
+- `printIp()`: Displays IP addresses in dot notation
+- `print_cmp_mac()`: Compares and prints MAC addresses
+- `print_mac_table_enty()`: Prints the entire ARP cache
